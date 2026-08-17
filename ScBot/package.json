@@ -1,0 +1,13 @@
+{
+  "name": "scbot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bot.js",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "dotenv": "^16.3.1",
+    "pg": "^8.12.0",
+    "nodemailer": "^6.9.7",
+    "node-fetch": "^3.3.2"
+  }
+}

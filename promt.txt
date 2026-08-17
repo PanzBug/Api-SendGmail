@@ -1,0 +1,51 @@
+Buatkan saya issue.md yang berisikan Planning untuk project ini dengan pembahasan yang lengkap dan terstruktur 
+
+yang akan di implementasikan oleh Programmer Junior dan Model Ai yang rendah.
+
+Berikan Planning yang wajib di Buat :
+
+saya ingin anda untuk menambahkan fitur baru pada Bot Telegram Webhook yang sudah pada project ini berikut spesifikasi fitur nya :
+1. banding - Mengirimkan Pesan Ke Gmail Tujuan dengan alur seperti ini:
+/banding -> Bot memberikan instruksi suruh mengirimkan Username Ex: @telegram -> bot akan memvalidasi Akun telegram tersebut apakah terdaftar, jika terdaftar, bot akan memberikan notifikasi agar memberikan ID Telegram Ex: 12234567 -> Bot akan melanjutkan ke Step berikut, dan Botz akan mengirimkan Notifikasi agar memasukan Link Tautan Profile Ex: ipanzx -> Botz Akan melanjutkan ke step terakhir yaitu Mengirimkan Foto Profile Telegram yang di maksud, jika sudah menyelesaikan step" nya bot akan Mulai mengirimkan Pesan Gmail ke tujuan yang di tentukan.
+
+Subject: [EMERGENCY] Fake Telegram Account Actively Hijacking User Accounts in the Name of INDODAX – Immediate Action Please
+Pesan : Dear INDODAX Support Team,
+
+With respect and urgency,
+
+I, Ipanzx, would like to report an emergency situation that requires immediate action. A fake Telegram account is currently actively impersonating INDODAX and is attempting to hijack accounts using a very dangerous method.
+
+Chronology of the Serious Method:
+The account contacted me claiming to be the "INDODAX Security Team," informing me that my account was experiencing suspicious activity and would soon be frozen. To "prevent the freeze," they asked me to immediately submit the OTP code under the pretext of an emergency verification process. This is clearly an account takeover attempt that could result in the theft of digital assets.
+
+Fake Account Data Currently in Operation:
+
+· Username: ${AccountName}
+· ID: ${TelegramID}
+· Profile Link: https://t.me/${AccountLink}
+· Method: Posing as Security Team, warning about freezing the fake account, requesting OTP Code for emergency verification
+
+Why This Is Urgent:
+
+1. This account is still online and actively contacting other users.
+2. The "threat of freezing the account" method is very effective in creating panic among victims.
+3. Every minute of delay has the potential to cause more victims to lose access to their accounts and assets.
+
+I strongly urge INDODAX to immediately:
+
+1. Confirm this report within hours.
+2. Officially escalate this to Telegram as soon as possible (ideally within <3 hours).
+3. Issue an official warning announcement on the INDODAX channel to alert other users.
+
+I have attached all evidence of conversations and the account profile. I've also reported this through the Report feature, but an official report from the brand owner is crucial for Telegram to immediately block and label the account as a scam.
+
+Please protect us, your users. This isn't just another scam attempt—it's an organized account hijacking attempt under the INDODAX name.
+
+Thank you for your attention and swift action. I'm available to contact you anytime if you need additional information.
+
+Regards,
+Ipanzx
+
+Tujuan berbentuk Array : Tujuan = [ berisi 50 Gmail ]
+
+Botz akan Mengirimkan Pesan Ke Gmail Tujuan yang di tentukan secara satu persatu hingga hingga semua gmail Tujuan sudah di kirimkan, setiap pengiriman berikan Colldown agar tidak spam pengiriman.

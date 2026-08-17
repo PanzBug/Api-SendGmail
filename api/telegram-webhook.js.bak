@@ -1,0 +1,495 @@
+import { Telegraf } from 'telegraf';
+import { PendingCustomKey } from '../models/PendingCustomKey.js';
+import { Transaction } from '../models/Transaction.js';
+import { Gmail } from '../models/Gmail.js';
+import { BandingSession } from '../models/BandingSession.js';
+import connectDB from '../utils/connectDB.js';
+import { TUJUAN_EMAILS } from '../utils/emailTargets.js';
+import nodemailer from 'nodemailer';
+
+const BASE_URL = process.env.BASE_URL;
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_ID || '').split(',').map(id => id.trim());
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function isAdmin(chatId) {
+  return ADMIN_CHAT_IDS.includes(String(chatId));
+}
+
+export default async function handler(req, res) {
+  res.json = (data) => {
+    res.setHeader('Content-Type', 'application/json');
+    return res.send(JSON.stringify(data, null, 2));
+  };
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    return res.status(405).json({
+      status: 'error',
+      error: 'Method Not Allowed',
+      message: 'Webhook Telegram hanya menerima POST request.',
+      usage: 'Endpoint ini digunakan oleh Telegram untuk mengirim update. Jangan dipanggil manual. Untuk menguji bot, gunakan perintah di aplikasi Telegram.',
+      author: 'Ipanzxdev'
+    });
+  }
+
+  const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  if (!BOT_TOKEN) {
+    console.error('FATAL: TELEGRAM_BOT_TOKEN missing');
+    return res.status(500).json({ error: 'Missing bot token' });
+  }
+
+  try {
+    const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 9_000 });
+
+    // Fungsi kirim pesan dengan retry jika rate limit
+    const sendMessageWithRetry = async (chatId, text, retries = 3) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          await bot.telegram.sendMessage(chatId, text);
+          return;
+        } catch (err) {
+          if (err.response && err.response.statusCode === 429) {
+            const retryAfter = err.response.body?.parameters?.retry_after || 5;
+            console.log(`[sendMessage] Rate limit, menunggu ${retryAfter} detik... (attempt ${i+1}/${retries})`);
+            await sleep(retryAfter * 1000);
+          } else {
+            throw err;
+          }
+        }
+      }
+      throw new Error('Gagal mengirim pesan setelah beberapa percobaan.');
+    };
+
+    bot.start((ctx) => ctx.reply('Selamat datang! Gunakan /buy untuk membeli API key.\n\nGunakan /cancel untuk membatalkan transaksi yang sedang berlangsung.'));
+    bot.help((ctx) => ctx.reply(
+      '/buy - Beli API key\n' +
+      '/banding - Laporkan akun fake (Emergency)\n' +
+      '/cancel - Batalkan transaksi pending terakhir\n' +
+      '/batal - Batalkan input custom key atau pelaporan\n\n' +
+      'Admin commands:\n' +
+      '/addkey <key> <email> <duration>\n' +
+      '/delkey <key>\n' +
+      '/listkey\n' +
+      '/addgmail <email> <app_password>\n' +
+      '/delgmail <email>\n' +
+      '/listgmail\n' +
+      '/dailyreport - Kirim laporan harian penggunaan Gmail (alias /rekap)'
+    ));
+
+    // ========== CANCEL TRANSACTION ==========
+    bot.command(['cancel', 'batalkan'], async (ctx) => {
+      const chatId = ctx.chat.id;
+      await connectDB();
+      const pendingTransaction = await Transaction.findOne({ chatId, status: 'pending' }).sort({ createdAt: -1 });
+      if (!pendingTransaction) {
+        return ctx.reply('❌ Tidak ada transaksi pending yang ditemukan.');
+      }
+      await Transaction.deleteOne({ _id: pendingTransaction._id });
+      await ctx.reply(`✅ Transaksi dengan ID ${pendingTransaction.orderId} telah dibatalkan.`);
+    });
+
+    // ========== ADMIN COMMANDS ==========
+    bot.command('addkey', async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
+      const args = ctx.message.text.split(' ').slice(1);
+      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> (1h,7h,1month,permanent)');
+      const [key, email, duration] = args;
+      try {
+        const response = await fetch(`${BASE_URL}/api/admin?action=create`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
+          body: JSON.stringify({ key, email, duration })
+        });
+        const data = await response.json();
+        if (response.ok) ctx.reply(`✅ API Key ${key} berhasil ditambahkan.`);
+        else ctx.reply(`❌ Gagal: ${data.error}`);
+      } catch (err) {
+        ctx.reply('❌ Error menghubungi server.');
+      }
+    });
+
+    bot.command('delkey', async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
+      const args = ctx.message.text.split(' ').slice(1);
+      if (args.length < 1) return ctx.reply('Format: /delkey <key>');
+      const key = args[0];
+      try {
+        const response = await fetch(`${BASE_URL}/api/admin?action=delete`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
+          body: JSON.stringify({ key })
+        });
+        const data = await response.json();
+        if (response.ok) ctx.reply(`✅ API Key ${key} dihapus.`);
+        else ctx.reply(`❌ Gagal: ${data.error}`);
+      } catch (err) {
+        ctx.reply('❌ Error menghubungi server.');
+      }
+    });
+
+    bot.command('listkey', async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
+      try {
+        const response = await fetch(`${BASE_URL}/api/admin?action=list`, {
+          headers: { 'x-admin-key': process.env.ADMIN_API_KEY }
+        });
+        const data = await response.json();
+        if (!data.success) return ctx.reply('Gagal mengambil data.');
+        if (data.keys.length === 0) return ctx.reply('Tidak ada API Key.');
+        let msg = '*Daftar API Key:*\n';
+        for (const k of data.keys.slice(0, 20)) {
+          msg += `\`${k.key}\` - ${k.duration} - ${k.isActive ? '✅ aktif' : '❌ nonaktif'}\n`;
+        }
+        if (data.keys.length > 20) msg += `\n... dan ${data.keys.length - 20} lainnya.`;
+        ctx.reply(msg, { parse_mode: 'Markdown' });
+      } catch (err) {
+        ctx.reply('❌ Error menghubungi server.');
+      }
+    });
+
+    // ========== GMAIL MANAGEMENT ==========
+    bot.command('addgmail', async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
+      const args = ctx.message.text.split(' ').slice(1);
+      if (args.length < 2) return ctx.reply('Format: /addgmail <gmail> <app_password>');
+      
+      const [email, appPassword] = args;
+      try {
+        await connectDB();
+        await Gmail.create({ email, appPassword });
+        ctx.reply(`✅ Gmail ${email} berhasil ditambahkan.`);
+      } catch (err) {
+        if (err.code === 11000) return ctx.reply('❌ Gmail sudah terdaftar.');
+        ctx.reply('❌ Gagal menambahkan Gmail.');
+      }
+    });
+
+    bot.command('delgmail', async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
+      const args = ctx.message.text.split(' ').slice(1);
+      if (args.length < 1) return ctx.reply('Format: /delgmail <gmail>');
+      
+      const email = args[0];
+      try {
+        await connectDB();
+        const result = await Gmail.deleteOne({ email });
+        if (result.deletedCount > 0) ctx.reply(`✅ Gmail ${email} dihapus.`);
+        else ctx.reply('❌ Gmail tidak ditemukan.');
+      } catch (err) {
+        ctx.reply('❌ Error saat menghapus Gmail.');
+      }
+    });
+
+    bot.command('listgmail', async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
+      try {
+        await connectDB();
+        const gmails = await Gmail.find().sort({ createdAt: 1 });
+        if (gmails.length === 0) return ctx.reply('📭 Daftar Gmail kosong.');
+        
+        let message = '📋 **Daftar Gmail:**\n\n';
+        gmails.forEach((g, index) => {
+          message += `${index + 1}. ${g.email}\n`;
+        });
+        ctx.reply(message, { parse_mode: 'Markdown' });
+      } catch (err) {
+        ctx.reply('❌ Gagal mengambil daftar Gmail.');
+      }
+    });
+
+    // ========== DAILY REPORT (MANUAL) ==========
+    bot.command(['dailyreport', 'rekap'], async (ctx) => {
+      if (!isAdmin(ctx.chat.id)) {
+        await sendMessageWithRetry(ctx.chat.id, '❌ Anda bukan admin.');
+        return;
+      }
+
+      try {
+        // Panggil API laporan harian (tanpa pesan awal untuk mengurangi rate limit)
+        const response = await fetch(`${BASE_URL}/api/daily-report`, {
+          method: 'GET',
+          headers: { 'x-admin-key': process.env.ADMIN_API_KEY }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+          await sendMessageWithRetry(ctx.chat.id, `✅ Laporan harian berhasil dikirim ke admin (${data.count} akun digunakan hari ini).`);
+        } else {
+          await sendMessageWithRetry(ctx.chat.id, `❌ Gagal: ${data.error || 'Terjadi kesalahan.'}`);
+        }
+      } catch (err) {
+        console.error('Error dailyreport:', err);
+        await sendMessageWithRetry(ctx.chat.id, '❌ Gagal menghubungi server untuk laporan harian.');
+      }
+    });
+
+    // ========== BANDING ==========
+    bot.command('banding', async (ctx) => {
+      await connectDB();
+      await BandingSession.findOneAndUpdate(
+        { chatId: ctx.chat.id },
+        { step: 0 },
+        { upsert: true, new: true }
+      );
+      ctx.reply('🛡️ **Mode Pelaporan Emergency**\n\nSilakan masukkan Username akun yang ingin dilaporkan (Contoh: @telegram):');
+    });
+
+    // ========== BUY ==========
+    bot.command('buy', async (ctx) => {
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🕐 1 Jam (Rp5.000)', callback_data: 'buy_1h' }],
+            [{ text: '🕖 7 Jam (Rp15.000)', callback_data: 'buy_7h' }],
+            [{ text: '📅 1 Bulan (Rp50.000)', callback_data: 'buy_1month' }],
+            [{ text: '♾️ Permanen (Rp150.000)', callback_data: 'buy_permanent' }]
+          ]
+        }
+      };
+      await ctx.reply('Pilih durasi API key:', keyboard);
+    });
+
+    bot.action(/buy_(1h|7h|1month)/, async (ctx) => {
+      const duration = ctx.match[1];
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💳 Bayar dengan QRIS (Qiospay)', callback_data: `gateway_qiospay_${duration}` }],
+            [{ text: '📱 Bayar dengan QRIS (Pakasir)', callback_data: `gateway_pakasir_${duration}` }]
+          ]
+        }
+      };
+      await ctx.reply('Pilih metode pembayaran:', keyboard);
+      await ctx.answerCbQuery();
+    });
+
+    bot.action('buy_permanent', async (ctx) => {
+      await connectDB();
+      await PendingCustomKey.findOneAndUpdate({ chatId: ctx.chat.id }, { duration: 'permanent' }, { upsert: true });
+      await ctx.reply('🔑 Kirimkan custom API Key (8-64 karakter, huruf/angka/_-). Ketik /batal untuk batal.');
+      await ctx.answerCbQuery();
+    });
+
+    bot.action(/gateway_(qiospay|pakasir)_(1h|7h|1month)/, async (ctx) => {
+      const gateway = ctx.match[1];
+      const duration = ctx.match[2];
+      await processPayment(ctx, gateway, duration, ctx.chat.id);
+    });
+
+    bot.action(/gateway_(qiospay|pakasir)_permanent_custom_(.+)/, async (ctx) => {
+      const gateway = ctx.match[1];
+      const customKey = ctx.match[2];
+      await processPayment(ctx, gateway, 'permanent', ctx.chat.id, customKey);
+    });
+
+    // ========== TEXT HANDLER ==========
+    bot.on('text', async (ctx) => {
+      const chatId = ctx.chat.id;
+      const text = ctx.message.text.trim();
+      await connectDB();
+
+      if (text === '/batal') {
+        await PendingCustomKey.deleteOne({ chatId });
+        await BandingSession.deleteOne({ chatId });
+        await ctx.reply('❌ Dibatalkan.');
+        return;
+      }
+      
+      const session = await BandingSession.findOne({ chatId });
+      if (session) {
+        if (session.step === 0) {
+          session.accountName = text;
+          session.step = 1;
+          await session.save();
+          return ctx.reply('✅ Username diterima. Sekarang masukkan ID Telegram akun tersebut (Contoh: 12234567):');
+        } else if (session.step === 1) {
+          session.telegramId = text;
+          session.step = 2;
+          await session.save();
+          return ctx.reply('✅ ID diterima. Sekarang masukkan Link Tautan Profile (Contoh: ipanzx):');
+        } else if (session.step === 2) {
+          session.profileLink = text;
+          session.step = 3;
+          await session.save();
+          return ctx.reply('✅ Link diterima. Terakhir, kirimkan Foto Profile Telegram yang dimaksud:');
+        }
+      }
+
+      const pending = await PendingCustomKey.findOne({ chatId });
+      if (!pending || pending.duration !== 'permanent') return;
+      await PendingCustomKey.deleteOne({ chatId });
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💳 Qiospay', callback_data: `gateway_qiospay_permanent_custom_${text}` }],
+            [{ text: '📱 Pakasir', callback_data: `gateway_pakasir_permanent_custom_${text}` }]
+          ]
+        }
+      };
+      await ctx.reply('Pilih metode pembayaran untuk paket permanen:', keyboard);
+    });
+
+    // ========== PHOTO HANDLER (BANDING) ==========
+    bot.on('photo', async (ctx) => {
+      const chatId = ctx.chat.id;
+      await connectDB();
+      const session = await BandingSession.findOne({ chatId });
+      
+      if (session && session.step === 3) {
+        session.profilePhoto = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+        await session.save();
+        
+        ctx.reply('⏳ Memulai proses pengiriman laporan ke 50 email tujuan secara bertahap. Mohon tunggu...');
+        processBanding(ctx, session);
+        await BandingSession.deleteOne({ chatId });
+      }
+    });
+
+    // ========== PAYMENT PROCESS ==========
+    async function processPayment(ctx, gateway, duration, chatId, customApiKey = null) {
+      await ctx.reply(`⏳ Menyiapkan pembayaran via ${gateway === 'qiospay' ? 'Qiospay' : 'Pakasir'}...`);
+      const payload = { gateway, duration, chatId };
+      if (customApiKey) payload.customApiKey = customApiKey;
+      try {
+        const response = await fetch(`${BASE_URL}/api/create-transaction`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (data.success) {
+          const base64Data = data.qrImageUrl.split(',')[1];
+          const caption = gateway === 'qiospay'
+            ? `💳 *Total: Rp${data.amount.toLocaleString('id-ID')}*\n\nScan QR Code di atas dan lakukan pembayaran sesuai nominal.\n\nSetelah bayar, sistem akan otomatis memverifikasi.\nOrder ID: \`${data.orderId}\``
+            : `💳 *Total: Rp${data.amount.toLocaleString('id-ID')}*\n\nQR Code berlaku hingga ${new Date(data.expiredAt).toLocaleString()}\nOrder ID: \`${data.orderId}\``;
+          
+          const cancelKeyboard = {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '❌ Batal', callback_data: `cancel_${data.orderId}` }]
+              ]
+            }
+          };
+          await ctx.replyWithPhoto(
+            { source: Buffer.from(base64Data, 'base64') },
+            { caption, parse_mode: 'Markdown', ...cancelKeyboard }
+          );
+        } else {
+          await ctx.reply(`❌ Gagal membuat transaksi: ${data.error || 'Coba lagi nanti'}`);
+        }
+      } catch (err) {
+        console.error('processPayment error:', err);
+        await ctx.reply('❌ Terjadi kesalahan saat menghubungi server pembayaran. Silakan coba lagi.');
+      }
+      await ctx.answerCbQuery();
+    }
+
+    // ========== BANDING EMAIL PROCESS ==========
+    async function processBanding(ctx, session) {
+      const senderGmail = await getRandomGmail();
+      if (!senderGmail) {
+        return ctx.reply('❌ Gagal: Tidak ada akun Gmail pengirim yang tersedia di database.');
+      }
+      await sendBandingEmails(ctx, session, senderGmail);
+    }
+
+    async function getRandomGmail() {
+      const count = await Gmail.countDocuments();
+      if (count === 0) return null;
+      const random = Math.floor(Math.random() * count);
+      return await Gmail.findOne().skip(random);
+    }
+
+    async function sendBandingEmails(ctx, session, senderGmail) {
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        auth: { user: senderGmail.email, pass: senderGmail.appPassword }
+      });
+
+      const subject = `[EMERGENCY] Fake Telegram Account Actively Hijacking User Accounts in the Name of INDODAX – Immediate Action Please`;
+      
+      const body = `Dear INDODAX Support Team,
+
+With respect and urgency,
+
+I, Ipanzx, would like to report an emergency situation that requires immediate action. A fake Telegram account is currently actively impersonating INDODAX and is attempting to hijack accounts using a very dangerous method.
+
+Chronology of the Serious Method:
+The account contacted me claiming to be the "INDODAX Security Team," informing me that my account was experiencing suspicious activity and would soon be frozen. To "prevent the freeze," they asked me to immediately submit the OTP code under the pretext of an emergency verification process. This is clearly an account takeover attempt that could result in the theft of digital assets.
+
+Fake Account Data Currently in Operation:
+
+· Username: ${session.accountName}
+· ID: ${session.telegramId}
+· Profile Link: https://t.me/${session.profileLink}
+· Method: Posing as Security Team, warning about freezing the fake account, requesting OTP Code for emergency verification
+
+Why This Is Urgent:
+
+1. This account is still online and actively contacting other users.
+2. The "threat of freezing the account" method is very effective in creating panic among victims.
+3. Every minute of delay has the potential to cause more victims to lose access to their accounts and assets.
+
+I strongly urge INDODAX to immediately:
+
+1. Confirm this report within hours.
+2. Officially escalate this to Telegram as soon as possible (ideally within <3 hours).
+3. Issue an official warning announcement on the INDODAX channel to alert other users.
+
+I have attached all evidence of conversations and the account profile. I've also reported this through the Report feature, but an official report from the brand owner is crucial for Telegram to immediately block and label the account as a scam.
+
+Please protect us, your users. This isn't just another scam attempt—it's an organized account hijacking attempt under the INDODAX name.
+
+Thank you for your attention and swift action. I'm available to contact you anytime if you need additional information.
+
+Regards,
+Ipanzx`;
+
+      let successCount = 0;
+      for (let i = 0; i < TUJUAN_EMAILS.length; i++) {
+        const target = TUJUAN_EMAILS[i];
+        try {
+          await transporter.sendMail({
+            from: `"${senderGmail.email}" <${senderGmail.email}>`,
+            to: target,
+            subject: subject,
+            text: body
+          });
+          successCount++;
+          console.log(`[${i+1}/${TUJUAN_EMAILS.length}] Sent to ${target}`);
+        } catch (err) {
+          console.error(`Failed to send to ${target}:`, err);
+        }
+        if (i < TUJUAN_EMAILS.length - 1) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
+      
+      await ctx.reply(`✅ Selesai! Laporan telah dikirim ke ${successCount} dari ${TUJUAN_EMAILS.length} email tujuan.`);
+    }
+
+    // ========== CANCEL BUTTON ==========
+    bot.action(/cancel_(.+)/, async (ctx) => {
+      const orderId = ctx.match[1];
+      const chatId = ctx.chat.id;
+      await connectDB();
+      const transaction = await Transaction.findOne({ orderId, chatId, status: 'pending' });
+      if (!transaction) {
+        await ctx.reply('❌ Transaksi tidak ditemukan atau sudah diproses.');
+        await ctx.answerCbQuery();
+        return;
+      }
+      await Transaction.deleteOne({ _id: transaction._id });
+      await ctx.reply(`✅ Transaksi dengan ID ${orderId} telah dibatalkan.`);
+      await ctx.answerCbQuery();
+    });
+
+    await bot.handleUpdate(req.body);
+    return res.status(200).send('OK');
+  } catch (error) {
+    console.error('Unhandled webhook error:', error);
+    return res.status(500).send('Internal Server Error');
+  }
+}
