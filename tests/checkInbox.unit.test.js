@@ -124,3 +124,36 @@ test('mapError: timeout -> 504, auth -> 401, other -> 500', () => {
   assert.equal(mapError(new Error('AUTHENTICATIONFAILED invalid credentials')).statusCode, 401);
   assert.equal(mapError(new Error('something else')).statusCode, 500);
 });
+
+test('runInbox list: skips downloading snippets after 10 messages for performance', async () => {
+  const messages = [];
+  for (let i = 1; i <= 15; i++) {
+    messages.push({
+      uid: i,
+      seq: i,
+      envelope: { subject: `Subj ${i}`, from: [{ address: 'sender@x.com' }], to: [{ address: 'rec@x.com' }], date: 'date', messageId: `msg-${i}` },
+      bodyStructure: { type: 'text/plain', part: '1' }
+    });
+  }
+
+  let downloadCount = 0;
+  const client = {
+    mailbox: { exists: 15 },
+    async *fetch() {
+      for (const m of messages) yield m;
+    },
+    async download() {
+      downloadCount++;
+      return { content: readStream('Ini snippet teks dari badan email.') };
+    },
+  };
+
+  const { status, json } = await runInbox(client, { limit: 15 });
+
+  assert.equal(status, 200);
+  assert.equal(json.count, 15);
+  assert.equal(downloadCount, 10);
+
+  const skippedCount = json.emails.filter(e => e.snippet.includes('Cuplikan dilewati')).length;
+  assert.equal(skippedCount, 5);
+});

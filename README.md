@@ -112,8 +112,10 @@ Membaca inbox Gmail via IMAP. Bisa list email terbaru (metadata + cuplikan), men
 
 **Perhatian:** Untuk list/pencarian, response hanya berisi metadata dan cuplikan. Untuk mendapatkan konten email lengkap (text/HTML), gunakan parameter `uid` dengan UID spesifik.
 
+> ⚠️ **Catatan Performa & Anti-Deadlock:** Untuk mencegah deadlock dan timeout jaringan, jika melakukan penarikan banyak email sekaligus, cuplikan (`snippet`) hanya akan diunduh secara nyata untuk **10 email terbaru**. Email selebihnya tetap ditarik metadatanya tetapi cuplikannya akan dilewati dengan nilai `(Cuplikan dilewati untuk performa)`.
+
 **Request Body:**
-\`\`\`json
+```json
 {
   "apiKey": "YOUR_API_KEY",
   "gmailUser": "anda@gmail.com",
@@ -123,17 +125,18 @@ Membaca inbox Gmail via IMAP. Bisa list email terbaru (metadata + cuplikan), men
   "search": "keyword",
   "from": "pengirim@example.com"
 }
-\`\`\`
+```
 
 | Parameter | Wajib | Default | Deskripsi |
 |---|---|---|---|
-| \`apiKey\` | ✅ | - | API Key valid |
-| \`gmailUser\` | ✅ | - | Alamat Gmail |
-| \`gmailAppPassword\` | ✅ | - | App Password Gmail |
-| \`limit\` | ❌ | \`10\` (maks 50) | Jumlah email maksimal yang diambil |
-| \`uid\` | ❌ | \`null\` | UID spesifik untuk baca 1 email (mengembalikan konten penuh) |
-| \`search\` | ❌ | \`null\` | Cari di subject & body |
-| \`from\` | ❌ | \`null\` | Filter berdasarkan pengirim |
+| `apiKey` | ✅ | - | API Key valid |
+| `gmailUser` | ✅ | - | Alamat Gmail |
+| `gmailAppPassword` | ✅ | - | App Password Gmail |
+| `limit` | ❌ | `10` | Jumlah email maksimal yang diambil. Mendukung `"all"`, `0`, atau `-1` untuk mengambil seluruh pesan di inbox. Batas maksimum angka untuk performa aman adalah `1000`. |
+| `uid` | ❌ | `null` | UID spesifik untuk baca 1 email (mengembalikan konten penuh) |
+| `search` | ❌ | `null` | Cari di subject & body |
+| `from` | ❌ | `null` | Filter berdasarkan pengirim |
+
 
 **Contoh cURL:**
 \`\`\`bash

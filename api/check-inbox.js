@@ -125,22 +125,34 @@ export async function runInbox(client, { uid, limit, from, search }) {
     fetchRangeOptions = { uid: false }; // Ensure fetch uses sequence numbers
   }
 
+  // To prevent IMAP deadlocks, fetch all messages into an array first to close the generator,
+  // freeing the connection before performing any secondary commands like client.download
+  const fetchedMessages = [];
   for await (let msg of client.fetch(sequence, fetchOptions, fetchRangeOptions)) {
+    fetchedMessages.push(msg);
+  }
+
+  // Sort messages descending by seq/uid first (latest first) to prioritize newer ones
+  fetchedMessages.sort((a, b) => b.seq - a.seq);
+
+  for (let msg of fetchedMessages) {
     let emailData = {
       uid: msg.uid,
       seq: msg.seq,
-      subject: msg.envelope.subject || '(Tanpa Subjek)',
-      from: msg.envelope.from?.[0]?.address || 'Unknown',
-      to: msg.envelope.to?.[0]?.address || 'Unknown',
-      date: msg.envelope.date,
-      messageId: msg.envelope.messageId,
+      subject: msg.envelope?.subject || '(Tanpa Subjek)',
+      from: msg.envelope?.from?.[0]?.address || 'Unknown',
+      to: msg.envelope?.to?.[0]?.address || 'Unknown',
+      date: msg.envelope?.date,
+      messageId: msg.envelope?.messageId,
       snippet: '', // Initialize snippet
     };
 
-    // Extract snippet from the first text part of the email
+    // Download snippet only if we are within a safe threshold to prevent timeouts
+    // For example, download snippets only for the latest 10 messages
+    const shouldDownloadSnippet = emails.length < 10;
     const textPartPath = msg.bodyStructure ? findTextPart(msg.bodyStructure) : null;
 
-    if (textPartPath) {
+    if (textPartPath && shouldDownloadSnippet) {
       try {
         // Download only a small portion of the text part for the snippet
         const snippetStream = await client.download(msg.uid.toString(), textPartPath, {
@@ -156,6 +168,8 @@ export async function runInbox(client, { uid, limit, from, search }) {
         console.warn(`Failed to download snippet for UID ${msg.uid}, part ${textPartPath}:`, downloadError.message);
         emailData.snippet = '(Gagal mengambil cuplikan)';
       }
+    } else if (textPartPath) {
+      emailData.snippet = '(Cuplikan dilewati untuk performa)';
     }
 
     emails.push(emailData);
@@ -269,7 +283,14 @@ export default async function handler(req, res) {
     }
 
     const { apiKey, gmailUser, gmailAppPassword, limit: rawLimit = 10, uid, search, from } = req.body;
-    const limit = Math.min(Math.max(1, parseInt(rawLimit)), 50); // Cap limit between 1 and 50
+    
+    // Support fetching all messages if rawLimit is 'all', 0, or -1. Else cap it up to 1000 for safety.
+    let limit;
+    if (rawLimit === 'all' || parseInt(rawLimit) === 0 || parseInt(rawLimit) === -1) {
+      limit = 999999; // effectively all messages
+    } else {
+      limit = Math.min(Math.max(1, parseInt(rawLimit)), 1000);
+    }
 
     if (!apiKey) return res.status(401).json({ error: 'API Key required' });
     if (!gmailUser || !gmailAppPassword)
