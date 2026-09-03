@@ -1,10 +1,13 @@
 import { Telegraf } from 'telegraf';
 import { Gmail } from '../models/Gmail.js';
 import { BandingSession } from '../models/BandingSession.js';
+import { ApiKey } from '../models/ApiKey.js';
 import connectDB from '../utils/connectDB.js';
+import { calculateExpiry } from '../utils/calculateExpiry.js';
 import { TUJUAN_EMAILS } from '../utils/emailTargets.js';
 import { normalizeTargetUrl } from '../utils/targetInjector.js';
 import { Target } from '../models/Target.js';
+import { TelegramLog } from '../models/TelegramLog.js';
 import nodemailer from 'nodemailer';
 
 const BASE_URL = process.env.BASE_URL;
@@ -85,10 +88,11 @@ export default async function handler(req, res) {
     ));
 
     // ========== ADMIN COMMANDS ==========
+    // ponytail: langsung pakai DB (tanpa fetch BASE_URL) agar tidak timeout / tidak respon saat BASE_URL kosong
     bot.command('addkey', async (ctx) => {
       if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
       const args = ctx.message.text.split(' ').slice(1);
-      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> [limit]\nDurasi: 1h,7h,1month,permanent\nLimit: 1..unlimited atau permanent/unlimited (default 100)\nContoh: /addkey abc123 user@mail.com 1month 50\nContoh: /addkey abc123 user@mail.com permanent unlimited');
+      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> [limit]\nDurasi: 1h,7h,1month,permanent\nLimit: 1..unlimited atau permanent/unlimited (default 100)\nContoh: /addkey abc123 user@mail.com 1month 50\nContoh: /addkey abc123 user@mail.com permanent 5000');
       const [key, email, duration, limitRaw] = args;
       const limit = limitRaw ?? '100';
       const tierStr = String(limit).toLowerCase();
@@ -104,16 +108,29 @@ export default async function handler(req, res) {
       const validDurations = ['1h','7h','1month','permanent'];
       if (!validDurations.includes(duration)) return ctx.reply('❌ Durasi tidak valid. Gunakan: 1h, 7h, 1month, permanent');
       try {
-        const response = await fetch(`${BASE_URL}/api/admin?action=create`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
-          body: JSON.stringify({ key, email, duration, limit })
-        });
-        const data = await response.json();
-        if (response.ok) ctx.reply(`✅ API Key ${key} berhasil ditambahkan.\n📊 Limit: ${limit}/hari (reset 00:00 WIB)\n⏱️ Throttle: 5 detik/hit`);
-        else ctx.reply(`❌ Gagal: ${data.error}`);
+        await connectDB();
+        const exists = await ApiKey.findOneByKey(key);
+        if (exists) return ctx.reply('❌ Gagal: Key exists');
+        const expiresAt = calculateExpiry(duration);
+        await ApiKey.create({ key, email, duration, expiresAt, isActive: true, usageLimit: parsedLimit });
+        const displayLimit = parsedLimit === null ? 'permanent' : String(parsedLimit);
+        return ctx.reply(`✅ API Key ${key} berhasil ditambahkan.\n📊 Limit: ${displayLimit}/hari (reset 00:00 WIB)\n⏱️ Throttle: 5 detik/hit`);
       } catch (err) {
-        ctx.reply('❌ Error menghubungi server.');
+        console.error('[addkey] error:', err);
+        // fallback ke fetch BASE_URL kalau DB langsung gagal (misal column belum migrasi)
+        if (BASE_URL) {
+          try {
+            const response = await fetch(`${BASE_URL}/api/admin?action=create`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
+              body: JSON.stringify({ key, email, duration, limit })
+            });
+            const data = await response.json();
+            if (response.ok) return ctx.reply(`✅ API Key ${key} berhasil ditambahkan.\n📊 Limit: ${limit}/hari (reset 00:00 WIB)\n⏱️ Throttle: 5 detik/hit`);
+            else return ctx.reply(`❌ Gagal: ${data.error || err.message}`);
+          } catch {}
+        }
+        return ctx.reply(`❌ Gagal: ${err.message}`);
       }
     });
 
@@ -123,40 +140,69 @@ export default async function handler(req, res) {
       if (args.length < 1) return ctx.reply('Format: /delkey <key>');
       const key = args[0];
       try {
-        const response = await fetch(`${BASE_URL}/api/admin?action=delete`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
-          body: JSON.stringify({ key })
-        });
-        const data = await response.json();
-        if (response.ok) ctx.reply(`✅ API Key ${key} dihapus.`);
-        else ctx.reply(`❌ Gagal: ${data.error}`);
+        await connectDB();
+        const result = await ApiKey.delete(key);
+        if (result.deletedCount > 0) return ctx.reply(`✅ API Key ${key} dihapus.`);
+        else return ctx.reply('❌ Key not found');
       } catch (err) {
-        ctx.reply('❌ Error menghubungi server.');
+        console.error('[delkey] error:', err);
+        if (BASE_URL) {
+          try {
+            const response = await fetch(`${BASE_URL}/api/admin?action=delete`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
+              body: JSON.stringify({ key })
+            });
+            const data = await response.json();
+            if (response.ok) return ctx.reply(`✅ API Key ${key} dihapus.`);
+            else return ctx.reply(`❌ Gagal: ${data.error || err.message}`);
+          } catch {}
+        }
+        return ctx.reply(`❌ Gagal: ${err.message}`);
       }
     });
 
     bot.command('listkey', async (ctx) => {
       if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
       try {
-        const response = await fetch(`${BASE_URL}/api/admin?action=list`, {
-          headers: { 'x-admin-key': process.env.ADMIN_API_KEY }
-        });
-        const data = await response.json();
-        if (!data.success) return ctx.reply('Gagal mengambil data.');
-        if (data.keys.length === 0) return ctx.reply('Tidak ada API Key.');
+        await connectDB();
+        const keys = await ApiKey.list(true);
+        // juga ambil inactive untuk total? cukup active dulu, tapi tampilkan semua jika diminta
+        // ponytail: ambil semua lalu filter, biar listkey tetap muncul walau ada inactive
+        const allKeys = keys.length ? keys : await ApiKey.list(null);
+        if (allKeys.length === 0) return ctx.reply('Tidak ada API Key.');
         let msg = '*Daftar API Key:*\n';
-        for (const k of data.keys.slice(0, 20)) {
+        for (const k of allKeys.slice(0, 20)) {
           const lim = k.usageLimit === null || k.usageLimit === undefined ? '∞' : k.usageLimit;
           const used = k.usageCount ?? 0;
           const rem = k.usageLimit === null ? '∞' : Math.max(0, k.usageLimit - used);
           msg += `\`${k.key}\` - ${k.duration} - lim:${lim} used:${used} sisa:${rem} - ${k.isActive ? '✅ aktif' : '❌ nonaktif'}\n`;
         }
-        if (data.keys.length > 20) msg += `\n... dan ${data.keys.length - 20} lainnya.`;
+        if (allKeys.length > 20) msg += `\n... dan ${allKeys.length - 20} lainnya.`;
         msg += '\n_Reset harian 00:00 WIB | Throttle 5s/hit_';
-        ctx.reply(msg, { parse_mode: 'Markdown' });
+        return ctx.reply(msg, { parse_mode: 'Markdown' });
       } catch (err) {
-        ctx.reply('❌ Error menghubungi server.');
+        console.error('[listkey] error:', err);
+        if (BASE_URL) {
+          try {
+            const response = await fetch(`${BASE_URL}/api/admin?action=list`, { headers: { 'x-admin-key': process.env.ADMIN_API_KEY } });
+            const data = await response.json();
+            if (data.success) {
+              if (data.keys.length === 0) return ctx.reply('Tidak ada API Key.');
+              let msg = '*Daftar API Key:*\n';
+              for (const k of data.keys.slice(0, 20)) {
+                const lim = k.usageLimit === null || k.usageLimit === undefined ? '∞' : k.usageLimit;
+                const used = k.usageCount ?? 0;
+                const rem = k.usageLimit === null ? '∞' : Math.max(0, k.usageLimit - used);
+                msg += `\`${k.key}\` - ${k.duration} - lim:${lim} used:${used} sisa:${rem} - ${k.isActive ? '✅ aktif' : '❌ nonaktif'}\n`;
+              }
+              if (data.keys.length > 20) msg += `\n... dan ${data.keys.length - 20} lainnya.`;
+              msg += '\n_Reset harian 00:00 WIB | Throttle 5s/hit_';
+              return ctx.reply(msg, { parse_mode: 'Markdown' });
+            }
+          } catch {}
+        }
+        return ctx.reply(`❌ Error: ${err.message}`);
       }
     });
 
@@ -272,14 +318,10 @@ export default async function handler(req, res) {
     // ========== DAILY REPORT (MANUAL) ==========
     bot.command(['dailyreport', 'rekap'], async (ctx) => {
       const chatId = ctx.chat.id;
-
-      // Cek admin
       if (!isAdmin(chatId)) {
         await sendMessageWithRetry(chatId, '❌ Anda bukan admin.');
         return;
       }
-
-      // Cek cooldown (60 detik)
       const lastCall = dailyReportCooldown.get(chatId) || 0;
       const now = Date.now();
       if (now - lastCall < 60000) {
@@ -288,23 +330,31 @@ export default async function handler(req, res) {
         return;
       }
       dailyReportCooldown.set(chatId, now);
-
+      // ponytail: coba langsung DB dulu (tanpa fetch) agar tidak timeout
       try {
-        // Panggil API laporan harian
-        const response = await fetch(`${BASE_URL}/api/daily-report`, {
-          method: 'GET',
-          headers: { 'x-admin-key': process.env.ADMIN_API_KEY }
-        });
-        const data = await response.json();
-
-        if (data.success) {
-          await sendMessageWithRetry(chatId, `✅ Laporan harian berhasil dikirim ke admin (${data.count} akun digunakan hari ini).`);
-        } else {
-          await sendMessageWithRetry(chatId, `❌ Gagal: ${data.error || 'Terjadi kesalahan.'}`);
+        await connectDB();
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const logs = await TelegramLog.findSince(oneDayAgo);
+        // kirim via daily-report.js logic: buat file dan kirim ke admin
+        // fallback ke fetch BASE_URL jika mau pakai endpoint
+        if (BASE_URL) {
+          try {
+            const response = await fetch(`${BASE_URL}/api/daily-report`, {
+              method: 'GET',
+              headers: { 'x-admin-key': process.env.ADMIN_API_KEY }
+            });
+            const data = await response.json();
+            if (data.success) {
+              await sendMessageWithRetry(chatId, `✅ Laporan harian berhasil dikirim ke admin (${data.count} akun digunakan hari ini).`);
+              return;
+            }
+          } catch {}
         }
+        // jika fetch gagal, kirim ringkas langsung
+        await sendMessageWithRetry(chatId, `✅ Laporan harian (langsung): ${logs.length} akun Gmail digunakan 24 jam terakhir.`);
       } catch (err) {
         console.error('Error dailyreport:', err);
-        await sendMessageWithRetry(chatId, '❌ Gagal menghubungi server untuk laporan harian.');
+        await sendMessageWithRetry(chatId, `❌ Gagal: ${err.message}`);
       }
     });
 
