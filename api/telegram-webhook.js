@@ -70,8 +70,9 @@ export default async function handler(req, res) {
       'Admin commands:\n' +
       '/addkey <key> <email> <duration> <limit>\n' +
       '  duration: 1h, 7h, 1month, permanent\n' +
-      '  limit: 100, 1000, 10000, permanent (default 100)\n' +
-      '  contoh: /addkey abc123 user@mail.com 1month 1000\n' +
+      '  limit: 1..2147483647 atau permanent/unlimited (default 100)\n' +
+      '  contoh: /addkey abc123 user@mail.com 1month 50\n' +
+      '  contoh: /addkey abc123 user@mail.com permanent unlimited\n' +
       '/delkey <key>\n' +
       '/listkey\n' +
       '/addgmail <email> <app_password>\n' +
@@ -87,11 +88,19 @@ export default async function handler(req, res) {
     bot.command('addkey', async (ctx) => {
       if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
       const args = ctx.message.text.split(' ').slice(1);
-      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> [limit]\nDurasi: 1h,7h,1month,permanent\nLimit: 100,1000,10000,permanent (default 100)\nContoh: /addkey abc123 user@mail.com 1month 1000');
+      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> [limit]\nDurasi: 1h,7h,1month,permanent\nLimit: 1..unlimited atau permanent/unlimited (default 100)\nContoh: /addkey abc123 user@mail.com 1month 50\nContoh: /addkey abc123 user@mail.com permanent unlimited');
       const [key, email, duration, limitRaw] = args;
       const limit = limitRaw ?? '100';
-      const validLimits = ['100','1000','10000','permanent'];
-      if (!validLimits.includes(limit)) return ctx.reply('❌ Limit tidak valid. Gunakan: 100, 1000, 10000, permanent');
+      const tierStr = String(limit).toLowerCase();
+      let parsedLimit;
+      if (tierStr === 'permanent' || tierStr === 'unlimited') {
+        parsedLimit = null;
+      } else {
+        const n = parseInt(limit, 10);
+        if (isNaN(n) || n < 1) return ctx.reply('❌ Limit tidak valid. Gunakan 1..2147483647 atau permanent/unlimited');
+        if (n > 2147483647) return ctx.reply('❌ Limit terlalu besar (max 2147483647)');
+        parsedLimit = n;
+      }
       const validDurations = ['1h','7h','1month','permanent'];
       if (!validDurations.includes(duration)) return ctx.reply('❌ Durasi tidak valid. Gunakan: 1h, 7h, 1month, permanent');
       try {
