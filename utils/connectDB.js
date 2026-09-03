@@ -15,10 +15,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
 CREATE INDEX IF NOT EXISTS idx_api_keys_last_hit ON api_keys(last_hit_at);
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_limit INT;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_count INT NOT NULL DEFAULT 0;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS gmails (
   email TEXT PRIMARY KEY,
@@ -51,6 +47,16 @@ CREATE TABLE IF NOT EXISTS telegram_logs (
 );
 `;
 
+// tambahan idempotent untuk DB lama yang dibuat sebelum kolom limit ada
+// ponytail: dijalankan setiap connectDB, bukan cuma init pertama — agar ALTER tetap jalan walau initPromise sudah tercache lama
+const ENSURE_APIKEY_COLS = `
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_limit INT;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_count INT NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_api_keys_last_hit ON api_keys(last_hit_at);
+`;
+
 function getPool() {
   if (global.__pgPool) return global.__pgPool;
   const url = process.env.DATABASE_URL;
@@ -66,6 +72,7 @@ function getPool() {
 }
 
 let initPromise;
+let ensurePromise;
 
 async function connectDB() {
   const pool = getPool();
@@ -76,6 +83,15 @@ async function connectDB() {
     });
   }
   await initPromise;
+  // selalu pastikan kolom baru ada — untuk DB yang dibuat sebelum fitur limit
+  // di-cache per-proses tapi tetap dijalankan setidaknya sekali setelah deploy baru
+  if (!ensurePromise) {
+    ensurePromise = pool.query(ENSURE_APIKEY_COLS).catch((err) => {
+      // jika tabel belum ada (fresh DB), error bisa diabaikan karena SCHEMA sudah buat
+      console.warn('[connectDB] ensure cols warn:', err.message);
+    });
+  }
+  await ensurePromise;
   return pool;
 }
 
