@@ -47,20 +47,23 @@ CREATE TABLE IF NOT EXISTS telegram_logs (
 );
 `;
 
-// tambahan idempotent untuk DB lama yang dibuat sebelum kolom limit ada
-// ponytail: dijalankan setiap connectDB, bukan cuma init pertama — agar ALTER tetap jalan walau initPromise sudah tercache lama
-const ENSURE_APIKEY_COLS = `
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_limit INT;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_count INT NOT NULL DEFAULT 0;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-CREATE INDEX IF NOT EXISTS idx_api_keys_last_hit ON api_keys(last_hit_at);
-`;
+// ponytail: list ALTER terpisah agar pg tidak gagal karena multi-statement + IF NOT EXISTS
+const ENSURE_STMTS = [
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_limit INT`,
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_count INT NOT NULL DEFAULT 0`,
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ`,
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+  `CREATE INDEX IF NOT EXISTS idx_api_keys_last_hit ON api_keys(last_hit_at)`,
+];
 
 function getPool() {
   if (global.__pgPool) return global.__pgPool;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('Define DATABASE_URL');
+  // deteksi Mongo URL yang salah pakai di project Postgres
+  if (url.startsWith('mongodb')) {
+    throw new Error('DATABASE_URL is MongoDB URL, but this project uses Neon PostgreSQL (pg). Ganti ke postgresql://... ');
+  }
   if (!global.__pgPool) {
     global.__pgPool = new pg.Pool({
       connectionString: url,
@@ -72,7 +75,6 @@ function getPool() {
 }
 
 let initPromise;
-let ensurePromise;
 
 async function connectDB() {
   const pool = getPool();
@@ -83,15 +85,16 @@ async function connectDB() {
     });
   }
   await initPromise;
-  // selalu pastikan kolom baru ada — untuk DB yang dibuat sebelum fitur limit
-  // di-cache per-proses tapi tetap dijalankan setidaknya sekali setelah deploy baru
-  if (!ensurePromise) {
-    ensurePromise = pool.query(ENSURE_APIKEY_COLS).catch((err) => {
-      // jika tabel belum ada (fresh DB), error bisa diabaikan karena SCHEMA sudah buat
-      console.warn('[connectDB] ensure cols warn:', err.message);
-    });
+  // selalu pastikan kolom baru ada — untuk DB lama yang dibuat sebelum fitur limit
+  // jalankan per-statement agar tidak gagal karena satu statement, dan tidak di-cache permanen
+  for (const sql of ENSURE_STMTS) {
+    try { await pool.query(sql); } catch (e) {
+      // abaikan error "already exists" atau "relation does not exist" (fresh DB belum ada tabel)
+      if (!String(e.message).includes('already exists') && !String(e.message).includes('does not exist')) {
+        console.warn('[connectDB] ensure warn:', e.message);
+      }
+    }
   }
-  await ensurePromise;
   return pool;
 }
 
