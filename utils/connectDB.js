@@ -14,20 +14,16 @@ CREATE TABLE IF NOT EXISTS api_keys (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
-CREATE INDEX IF NOT EXISTS idx_api_keys_last_hit ON api_keys(last_hit_at);
-
 CREATE TABLE IF NOT EXISTS gmails (
   email TEXT PRIMARY KEY,
   app_password TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
 CREATE TABLE IF NOT EXISTS targets (
   username TEXT PRIMARY KEY,
   added_by TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
 CREATE TABLE IF NOT EXISTS banding_sessions (
   chat_id TEXT PRIMARY KEY,
   step INTEGER NOT NULL DEFAULT 0,
@@ -37,7 +33,6 @@ CREATE TABLE IF NOT EXISTS banding_sessions (
   profile_photo TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
 CREATE TABLE IF NOT EXISTS telegram_logs (
   id SERIAL PRIMARY KEY,
   gmail_user TEXT NOT NULL,
@@ -47,7 +42,6 @@ CREATE TABLE IF NOT EXISTS telegram_logs (
 );
 `;
 
-// ponytail: list ALTER terpisah agar pg tidak gagal karena multi-statement + IF NOT EXISTS
 const ENSURE_STMTS = [
   `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_limit INT`,
   `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_count INT NOT NULL DEFAULT 0`,
@@ -60,7 +54,6 @@ function getPool() {
   if (global.__pgPool) return global.__pgPool;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('Define DATABASE_URL');
-  // deteksi Mongo URL yang salah pakai di project Postgres
   if (url.startsWith('mongodb')) {
     throw new Error('DATABASE_URL is MongoDB URL, but this project uses Neon PostgreSQL (pg). Ganti ke postgresql://... ');
   }
@@ -85,11 +78,8 @@ async function connectDB() {
     });
   }
   await initPromise;
-  // selalu pastikan kolom baru ada — untuk DB lama yang dibuat sebelum fitur limit
-  // jalankan per-statement agar tidak gagal karena satu statement, dan tidak di-cache permanen
   for (const sql of ENSURE_STMTS) {
     try { await pool.query(sql); } catch (e) {
-      // abaikan error "already exists" atau "relation does not exist" (fresh DB belum ada tabel)
       if (!String(e.message).includes('already exists') && !String(e.message).includes('does not exist')) {
         console.warn('[connectDB] ensure warn:', e.message);
       }
