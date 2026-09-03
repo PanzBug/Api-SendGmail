@@ -81,6 +81,10 @@ export const ApiKey = {
    * ponytail: uses SELECT FOR UPDATE in transaction to avoid race
    */
   async consume(key) {
+    // ADMIN_API_KEY bypass: tidak ada limit & throttle — ponytail: guard paling atas, O(1)
+    if (key && process.env.ADMIN_API_KEY && key === process.env.ADMIN_API_KEY) {
+      return { allowed: true, status: 200, row: null, remaining: null, limit: null, used: 0, isAdmin: true };
+    }
     const pool = getPool();
     const client = await pool.connect();
     try {
