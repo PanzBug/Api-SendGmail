@@ -11,12 +11,14 @@ import { TelegramLog } from '../models/TelegramLog.js';
 import nodemailer from 'nodemailer';
 
 const BASE_URL = process.env.BASE_URL;
-const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_ID || '').split(',').map(id => id.trim());
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_ID || '').split(',').map(id => id.trim()).filter(Boolean);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function isAdmin(chatId) {
-  return ADMIN_CHAT_IDS.includes(String(chatId));
+  const ok = ADMIN_CHAT_IDS.includes(String(chatId));
+  console.log(`[isAdmin] chatId=${chatId} ADMIN_CHAT_IDS=${JSON.stringify(ADMIN_CHAT_IDS)} -> ${ok}`);
+  return ok;
 }
 
 // Cooldown untuk command dailyreport (60 detik)
@@ -44,8 +46,13 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Missing bot token' });
   }
 
+  console.log(`[webhook] incoming update chatId=${req.body?.message?.chat?.id} text=${req.body?.message?.text} from=${req.body?.message?.from?.id} ADMIN_CHAT_ID=${process.env.ADMIN_CHAT_ID} BASE_URL=${BASE_URL} DATABASE_URL=${process.env.DATABASE_URL ? 'set' : 'MISSING'}`);
+  if (!ADMIN_CHAT_IDS.length) console.warn('[webhook] ADMIN_CHAT_ID kosong — semua command admin akan ditolak');
+  if (!BASE_URL) console.warn('[webhook] BASE_URL kosong — fetch fallback tidak akan jalan');
+
   try {
-    const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 9_000 });
+    const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 25_000 });
+    bot.catch((err, ctx) => console.error('[bot.catch] error for', ctx?.updateType, err));
 
     // Fungsi kirim pesan dengan retry jika rate limit
     const sendMessageWithRetry = async (chatId, text, retries = 3) => {
@@ -65,6 +72,12 @@ export default async function handler(req, res) {
       }
       throw new Error('Gagal mengirim pesan setelah beberapa percobaan.');
     };
+
+    // debug: cek status admin kamu
+    bot.command('cekadmin', (ctx) => {
+      const cid = String(ctx.chat.id);
+      return ctx.reply(`chatId kamu: ${cid}\nADMIN_CHAT_ID env: ${process.env.ADMIN_CHAT_ID || '(kosong)'}\nisAdmin: ${isAdmin(cid) ? 'YA ✅' : 'TIDAK ❌'}\nDATABASE_URL: ${process.env.DATABASE_URL ? 'set' : 'MISSING'}\nBASE_URL: ${BASE_URL || '(kosong)'}`);
+    });
 
     bot.start((ctx) => ctx.reply('Selamat datang! Gunakan /help untuk melihat daftar perintah.'));
     bot.help((ctx) => ctx.reply(

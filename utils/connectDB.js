@@ -68,7 +68,7 @@ function getPool() {
     global.__pgPool = new pg.Pool({
       connectionString: url,
       ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 10000
+      connectionTimeoutMillis: 5000
     });
   }
   return global.__pgPool;
