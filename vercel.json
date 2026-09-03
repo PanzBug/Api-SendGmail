@@ -8,6 +8,7 @@
     { "src": "/api/telegram-webhook", "dest": "/api/telegram-webhook.js" },
     { "src": "/api/set-telegram-webhook", "dest": "/api/set-telegram-webhook.js" },
     { "src": "/api/cleanup-expired-keys", "dest": "/api/cleanup-expired-keys.js" },
+    { "src": "/api/reset-daily-usage", "dest": "/api/reset-daily-usage.js" },
     { "src": "/api/admin", "dest": "/api/admin.js" },
     { "src": "/api/daily-report", "dest": "/api/daily-report.js" }
   ],
@@ -19,6 +20,10 @@
     {
       "path": "/api/cleanup-expired-keys",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/reset-daily-usage",
+      "schedule": "0 17 * * *"
     }
   ]
 }
