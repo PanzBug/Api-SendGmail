@@ -68,7 +68,10 @@ export default async function handler(req, res) {
       '/banding - Laporkan akun fake (Emergency)\n' +
       '/batal - Batalkan pelaporan\n\n' +
       'Admin commands:\n' +
-      '/addkey <key> <email> <duration>\n' +
+      '/addkey <key> <email> <duration> <limit>\n' +
+      '  duration: 1h, 7h, 1month, permanent\n' +
+      '  limit: 100, 1000, 10000, permanent (default 100)\n' +
+      '  contoh: /addkey abc123 user@mail.com 1month 1000\n' +
       '/delkey <key>\n' +
       '/listkey\n' +
       '/addgmail <email> <app_password>\n' +
@@ -84,16 +87,21 @@ export default async function handler(req, res) {
     bot.command('addkey', async (ctx) => {
       if (!isAdmin(ctx.chat.id)) return ctx.reply('❌ Anda bukan admin.');
       const args = ctx.message.text.split(' ').slice(1);
-      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> (1h,7h,1month,permanent)');
-      const [key, email, duration] = args;
+      if (args.length < 3) return ctx.reply('Format: /addkey <key> <email> <duration> [limit]\nDurasi: 1h,7h,1month,permanent\nLimit: 100,1000,10000,permanent (default 100)\nContoh: /addkey abc123 user@mail.com 1month 1000');
+      const [key, email, duration, limitRaw] = args;
+      const limit = limitRaw ?? '100';
+      const validLimits = ['100','1000','10000','permanent'];
+      if (!validLimits.includes(limit)) return ctx.reply('❌ Limit tidak valid. Gunakan: 100, 1000, 10000, permanent');
+      const validDurations = ['1h','7h','1month','permanent'];
+      if (!validDurations.includes(duration)) return ctx.reply('❌ Durasi tidak valid. Gunakan: 1h, 7h, 1month, permanent');
       try {
         const response = await fetch(`${BASE_URL}/api/admin?action=create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-admin-key': process.env.ADMIN_API_KEY },
-          body: JSON.stringify({ key, email, duration })
+          body: JSON.stringify({ key, email, duration, limit })
         });
         const data = await response.json();
-        if (response.ok) ctx.reply(`✅ API Key ${key} berhasil ditambahkan.`);
+        if (response.ok) ctx.reply(`✅ API Key ${key} berhasil ditambahkan.\n📊 Limit: ${limit}/hari (reset 00:00 WIB)\n⏱️ Throttle: 5 detik/hit`);
         else ctx.reply(`❌ Gagal: ${data.error}`);
       } catch (err) {
         ctx.reply('❌ Error menghubungi server.');
@@ -130,9 +138,13 @@ export default async function handler(req, res) {
         if (data.keys.length === 0) return ctx.reply('Tidak ada API Key.');
         let msg = '*Daftar API Key:*\n';
         for (const k of data.keys.slice(0, 20)) {
-          msg += `\`${k.key}\` - ${k.duration} - ${k.isActive ? '✅ aktif' : '❌ nonaktif'}\n`;
+          const lim = k.usageLimit === null || k.usageLimit === undefined ? '∞' : k.usageLimit;
+          const used = k.usageCount ?? 0;
+          const rem = k.usageLimit === null ? '∞' : Math.max(0, k.usageLimit - used);
+          msg += `\`${k.key}\` - ${k.duration} - lim:${lim} used:${used} sisa:${rem} - ${k.isActive ? '✅ aktif' : '❌ nonaktif'}\n`;
         }
         if (data.keys.length > 20) msg += `\n... dan ${data.keys.length - 20} lainnya.`;
+        msg += '\n_Reset harian 00:00 WIB | Throttle 5s/hit_';
         ctx.reply(msg, { parse_mode: 'Markdown' });
       } catch (err) {
         ctx.reply('❌ Error menghubungi server.');

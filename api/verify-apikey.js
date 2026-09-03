@@ -41,7 +41,11 @@ if (req.method !== 'POST') {
       await ApiKey.deactivate(apiKey);
       return res.status(401).json({ valid: false, error: 'API Key expired' });
     }
-    res.status(200).json({ valid: true, role: 'user', email: keyData.email, duration: keyData.duration });
+    const limit = keyData.usageLimit === null ? 'permanent' : keyData.usageLimit;
+    const used = keyData.usageCount ?? 0;
+    const remaining = keyData.usageLimit === null ? null : Math.max(0, keyData.usageLimit - used);
+    const resetAt = keyData.usageLimit === null ? null : ApiKey.getResetAtWIB();
+    res.status(200).json({ valid: true, role: 'user', email: keyData.email, duration: keyData.duration, limit, used, remaining, resetAt, expiresAt: keyData.expiresAt });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Internal server error', detail: error.message });
