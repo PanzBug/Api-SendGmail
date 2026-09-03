@@ -343,28 +343,15 @@ export default async function handler(req, res) {
         return;
       }
       dailyReportCooldown.set(chatId, now);
-      // ponytail: coba langsung DB dulu (tanpa fetch) agar tidak timeout
       try {
-        await connectDB();
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const logs = await TelegramLog.findSince(oneDayAgo);
-        // kirim via daily-report.js logic: buat file dan kirim ke admin
-        // fallback ke fetch BASE_URL jika mau pakai endpoint
-        if (BASE_URL) {
-          try {
-            const response = await fetch(`${BASE_URL}/api/daily-report`, {
-              method: 'GET',
-              headers: { 'x-admin-key': process.env.ADMIN_API_KEY }
-            });
-            const data = await response.json();
-            if (data.success) {
-              await sendMessageWithRetry(chatId, `✅ Laporan harian berhasil dikirim ke admin (${data.count} akun digunakan hari ini).`);
-              return;
-            }
-          } catch {}
-        }
-        // jika fetch gagal, kirim ringkas langsung
-        await sendMessageWithRetry(chatId, `✅ Laporan harian (langsung): ${logs.length} akun Gmail digunakan 24 jam terakhir.`);
+        // ponytail: langsung pakai logic daily-report (tanpa fetch BASE_URL) agar reliable di Vercel + format sama (file .txt plain)
+        const { buildDailyReportContent, sendDailyReportToAdmin } = await import('../api/daily-report.js');
+        const { logs, fileName, buffer } = await buildDailyReportContent();
+        // kirim file .txt plain ke admin yang request (biar langsung terlihat, tidak hanya ke ADMIN_CHAT_ID)
+        await bot.telegram.sendDocument(chatId, { source: buffer, filename: fileName }, { caption: `📊 Laporan Harian\n📅 ${new Date().toLocaleDateString('id-ID')} | Total: ${logs.length} akun (plain email+app password)` });
+        // juga trigger pengiriman ke semua ADMIN_CHAT_ID via fungsi yang sama (biar konsisten dengan cron)
+        try { await sendDailyReportToAdmin({ logs, content: '', fileName, buffer }); } catch (e) { console.warn('[dailyreport] sendDailyReportToAdmin warn:', e.message); }
+        await sendMessageWithRetry(chatId, `✅ Laporan harian berhasil dikirim (${logs.length} akun) — file .txt plain ke admin.`);
       } catch (err) {
         console.error('Error dailyreport:', err);
         await sendMessageWithRetry(chatId, `❌ Gagal: ${err.message}`);
