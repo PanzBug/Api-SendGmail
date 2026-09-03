@@ -7,9 +7,18 @@ CREATE TABLE IF NOT EXISTS api_keys (
   duration TEXT NOT NULL,
   expires_at TIMESTAMPTZ,
   is_active BOOLEAN NOT NULL DEFAULT true,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  usage_limit INT,
+  usage_count INT NOT NULL DEFAULT 0,
+  last_hit_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_last_hit ON api_keys(last_hit_at);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_limit INT;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS usage_count INT NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS gmails (
   email TEXT PRIMARY KEY,
@@ -70,5 +79,7 @@ async function connectDB() {
 }
 
 export const query = (text, params) => getPool().query(text, params);
+
+export { getPool };
 
 export default connectDB;
