@@ -134,24 +134,14 @@ export default async function handler(req, res) {
 
     const cleanedPassword = gmailAppPassword.replace(/\s/g, '');
     const isAdmin = apiKey === process.env.ADMIN_API_KEY;
-    let isValid = false;
 
-    // ---------- Validasi API Key ----------
+    // ---------- Validasi API Key + throttle 5s + daily limit ----------
+    // ponytail: single ApiKey.consume handles expiry, throttle & quota atomically
     if (!isAdmin) {
       await connectDB();
-      const keyData = await ApiKey.findOneActive(apiKey);
-      if (keyData) {
-        isValid = true;
-        if (keyData.expiresAt && new Date() > keyData.expiresAt) {
-          await ApiKey.deactivate(apiKey);
-          isValid = false;
-        }
-      }
-    } else {
-      isValid = true;
+      const rl = await ApiKey.consume(apiKey);
+      if (!rl.allowed) return res.status(rl.status).json(rl.body);
     }
-
-    if (!isValid) return res.status(401).json({ error: 'Invalid or expired API Key' });
 
     // ---------- Injeksi username target ke body ----------
     const targets = await getAllTargets();
