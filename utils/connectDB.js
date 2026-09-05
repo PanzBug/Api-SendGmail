@@ -72,7 +72,11 @@ let initPromise;
 async function connectDB() {
   const pool = getPool();
   if (!initPromise) {
-    initPromise = pool.query(SCHEMA).catch((err) => {
+    console.info(`[connectDB][INFO] Initializing schema...`);
+    initPromise = pool.query(SCHEMA).then(() => {
+      console.info(`[connectDB][INFO] Schema initialized`);
+    }).catch((err) => {
+      console.error(`[connectDB][ERROR] Schema init failed: ${err.message}`);
       initPromise = null;
       throw err;
     });
@@ -81,7 +85,7 @@ async function connectDB() {
   for (const sql of ENSURE_STMTS) {
     try { await pool.query(sql); } catch (e) {
       if (!String(e.message).includes('already exists') && !String(e.message).includes('does not exist')) {
-        console.warn('[connectDB] ensure warn:', e.message);
+        console.warn(`[connectDB][WARN] ensure warn: ${e.message} sql=${sql.slice(0,60)}`);
       }
     }
   }
