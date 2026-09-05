@@ -56,7 +56,7 @@ async function sendMessageWithRateLimit(chatId, message, options = {}) {
 
   if (timeSinceLastMessage < MIN_SEND_INTERVAL) {
     const delay = MIN_SEND_INTERVAL - timeSinceLastMessage;
-    console.log(`[Rate Limit] Delaying message for ${delay}ms to ${chatId}`);
+    console.info(`[telegramNotifier][INFO] Rate limit delay ${delay}ms to ${chatId}`);
     await sleep(delay);
   }
 
@@ -65,14 +65,14 @@ async function sendMessageWithRateLimit(chatId, message, options = {}) {
   // ponytail: use axios directly so tests mock works; fallback to Telegraf if axios fails with network (prod)
   try {
     await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, payload);
-    console.log(`[Telegram] Pesan terkirim ke ${chatId}`);
+    console.info(`[telegramNotifier][INFO] Pesan terkirim ke ${chatId}`);
     lastMessageTime = Date.now();
   } catch (sendError) {
     // 429 handling for axios
     const status = sendError.response?.status || sendError.response?.statusCode;
     if (status === 429) {
       const retryAfter = sendError.response.data?.parameters?.retry_after || sendError.response.body?.parameters?.retry_after || 30;
-      console.warn(`[Rate Limit] Terkena 429 untuk ${chatId}. Menunggu ${retryAfter} detik.`);
+      console.warn(`[telegramNotifier][WARN] Rate limit 429 untuk ${chatId}. Menunggu ${retryAfter} detik.`);
       await sleep(retryAfter * 1000);
       try {
         await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, payload);
@@ -103,7 +103,7 @@ async function sendDocumentWithRateLimit(chatId, document, options = {}) {
 
   if (timeSinceLastMessage < MIN_SEND_INTERVAL) {
     const delay = MIN_SEND_INTERVAL - timeSinceLastMessage;
-    console.log(`[Rate Limit] Delaying document for ${delay}ms to ${chatId}`);
+    console.info(`[telegramNotifier][INFO] Rate limit delay document ${delay}ms to ${chatId}`);
     await sleep(delay);
   }
 

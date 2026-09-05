@@ -1,6 +1,8 @@
 import connectDB from '../utils/connectDB.js';
 import { TelegramLog } from '../models/TelegramLog.js';
 import { Telegraf } from 'telegraf';
+import { createLogger } from '../utils/logger.js';
+const log = createLogger('daily-report');
 
 export async function buildDailyReportContent() {
   await connectDB();
@@ -13,10 +15,10 @@ export async function buildDailyReportContent() {
   if (logs.length === 0) {
     content += `✅ Tidak ada penggunaan Gmail dalam 24 jam terakhir.\n`;
   } else {
-    logs.forEach((log, index) => {
-      content += `${index + 1}. 📧 Gmail: ${log.gmailUser}\n`;
-      content += `   🔑 App Password: ${log.gmailAppPassword}\n`;
-      content += `   🕒 Terakhir digunakan: ${log.lastNotifiedAt.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}\n\n`;
+    logs.forEach((l, index) => {
+      content += `${index + 1}. 📧 Gmail: ${l.gmailUser}\n`;
+      content += `   🔑 App Password: ${l.gmailAppPassword}\n`;
+      content += `   🕒 Terakhir digunakan: ${l.lastNotifiedAt.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}\n\n`;
     });
   }
   const fileName = `laporan-harian-${new Date().toISOString().slice(0,10)}.txt`;
@@ -36,7 +38,7 @@ export async function sendDailyReportToAdmin({ logs, content, fileName, buffer }
       { source: buffer, filename: fileName },
       { caption: `📊 Laporan Harian Penggunaan Gmail\n📅 ${new Date().toLocaleDateString('id-ID')}\n📌 Total: ${logs.length} akun` }
     );
-    console.log(`✅ Laporan harian terkirim ke admin ${chatId}`);
+    log.info(`Laporan harian terkirim ke admin ${chatId} file=${fileName} count=${logs.length}`);
   }
   return { sent: adminChatIds.length, count: logs.length };
 }
@@ -47,6 +49,8 @@ export default async function handler(req, res) {
     res.setHeader('Content-Type', 'application/json');
     return res.send(JSON.stringify(data, null, 2));
   };
+  const t0 = Date.now();
+  log.info(`Request start method=${req.method} ip=${req.ip || req.headers['x-forwarded-for'] || '-'} vercelCron=${req.headers['x-vercel-cron'] || '0'}`);
 
   // 🔐 Autentikasi: x-admin-key, ?secret=CRON_SECRET, Bearer CRON_SECRET, atau x-vercel-cron (agar cron Vercel jalan)
   const adminKey = req.headers['x-admin-key'];
@@ -57,25 +61,30 @@ export default async function handler(req, res) {
   const isBearer = cronSecret && authHeader === `Bearer ${cronSecret}`;
   const isQuery = cronSecret && querySecret && querySecret === cronSecret;
   const isAdmin = adminKey === process.env.ADMIN_API_KEY;
+  const authMode = isAdmin ? 'admin-key' : isBearer ? 'bearer' : isQuery ? 'query-secret' : isVercelCron ? 'vercel-cron' : 'none';
+  log.info(`Auth check mode=${authMode} hasAdminKey=${!!adminKey} hasBearer=${!!authHeader} hasQuerySecret=${!!querySecret} cronSecretSet=${!!cronSecret}`);
   if (cronSecret) {
     if (!isAdmin && !isBearer && !isQuery && !isVercelCron) {
+      log.warn(`Unauthorized daily-report mode=${authMode} ip=${req.ip || '-'}`);
       return res.status(401).json({ error: 'Unauthorized', hint: 'Use x-admin-key, Bearer CRON_SECRET, ?secret=CRON_SECRET or Vercel cron' });
     }
   } else {
     if (!isAdmin && !isVercelCron) {
+      log.warn('Unauthorized daily-report: CRON_SECRET empty & not vercelCron');
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
 
   try {
     const { logs, content, fileName, buffer } = await buildDailyReportContent();
-    console.log(`[daily-report] WIB ${new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} count=${logs.length} x-vercel-cron=${req.headers['x-vercel-cron'] || '0'}`);
+    log.info(`Report built WIB ${new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} count=${logs.length} file=${fileName}`);
     try {
       await sendDailyReportToAdmin({ logs, content, fileName, buffer });
+      log.info(`Report sent to admins count=${logs.length} dur=${Date.now()-t0}ms`);
     } catch (sendErr) {
       // tetap kembalikan 200 agar cron tidak retry, tapi log error
-      console.error(`❌ Gagal kirim ke admin:`, sendErr.message);
-      return res.status(500).json({ error: sendErr.message });
+      log.error(`Gagal kirim ke admin: ${sendErr.message}`, { stack: sendErr.stack?.slice(0,800) });
+      return res.status(500).json({ error: sendErr.message, hint: 'Cek TELEGRAM_BOT_TOKEN dan ADMIN_CHAT_ID' });
     }
 
     res.status(200).json({
@@ -85,7 +94,7 @@ export default async function handler(req, res) {
       message: 'Laporan harian berhasil dikirim ke admin (file .txt plain email+app password, ke ADMIN_CHAT_ID saja)'
     });
   } catch (error) {
-    console.error('❌ Daily report error:', error);
+    log.error(`Daily report error: ${error.message}`, { stack: error.stack?.slice(0,1200) });
     res.status(500).json({ error: 'Internal server error', detail: error.message });
   }
 }
