@@ -3,6 +3,8 @@ import { simpleParser } from 'mailparser';
 import cors from 'cors';
 import { ApiKey } from '../models/ApiKey.js';
 import connectDB from '../utils/connectDB.js';
+import { createLogger, maskKey, maskEmail } from '../utils/logger.js';
+const log = createLogger('check-inbox');
 
 const DEADLINE_MS = 25 * 1000; // respond before Vercel (60s) and before bot's 30s client timeout
 const READ_MAX_BYTES = 200 * 1024; // bound full-body download on uid read
@@ -230,6 +232,7 @@ export function mapError(error) {
 }
 
 export default async function handler(req, res) {
+  const t0 = Date.now();
   // Polyfill for res.json if not present (for local express compatibility)
   if (!res.json) {
     res.json = data => {
@@ -237,11 +240,12 @@ export default async function handler(req, res) {
       return res.send(JSON.stringify(data, null, 2));
     };
   }
-
+  log.info(`Request start method=${req.method} ip=${req.ip || req.headers['x-forwarded-for'] || '-'}`);
   try {
     await runMiddleware(req, res, cors());
 
     if (req.method !== 'POST') {
+      log.warn(`Method not allowed: ${req.method}`);
       return res.status(405).json({
         status: 'error',
         error: 'Method Not Allowed',
@@ -283,6 +287,7 @@ export default async function handler(req, res) {
     }
 
     const { apiKey, gmailUser, gmailAppPassword, limit: rawLimit = 10, uid, search, from } = req.body;
+    log.info(`Params apiKey=${maskKey(apiKey)} gmailUser=${maskEmail(gmailUser)} limit=${rawLimit} uid=${uid ?? '-'} search=${search ? '"'+String(search).slice(0,30)+'"' : '-'} from=${from ? maskEmail(from) : '-'}`);
     
     // Support fetching all messages if rawLimit is 'all', 0, or -1. Else cap it up to 1000 for safety.
     let limit;
@@ -292,19 +297,20 @@ export default async function handler(req, res) {
       limit = Math.min(Math.max(1, parseInt(rawLimit)), 1000);
     }
 
-    if (!apiKey) return res.status(401).json({ error: 'API Key required' });
-    if (!gmailUser || !gmailAppPassword)
-      return res.status(400).json({ error: 'Gmail credentials required' });
+    if (!apiKey) { log.warn('Validation fail: API Key required'); return res.status(401).json({ error: 'API Key required' }); }
+    if (!gmailUser || !gmailAppPassword) { log.warn('Validation fail: Gmail credentials required'); return res.status(400).json({ error: 'Gmail credentials required', hint: 'Isi gmailUser dan gmailAppPassword (App Password 16 char)' }); }
 
     const cleanedPassword = gmailAppPassword.replace(/\s/g, '');
     const isAdmin = apiKey === process.env.ADMIN_API_KEY;
+    log.info(`Auth check isAdmin=${isAdmin} apiKey=${maskKey(apiKey)}`);
 
     // ---------- Validasi API Key + throttle 5s + daily limit ----------
     if (!isAdmin) {
       await connectDB();
       const rl = await ApiKey.consume(apiKey);
-      if (!rl.allowed) return res.status(rl.status).json(rl.body);
-    }
+      if (!rl.allowed) { log.warn(`ApiKey rejected status=${rl.status} reason=${rl.body?.error || rl.body?.message || 'unknown'}`); return res.status(rl.status).json(rl.body); }
+      log.info(`ApiKey ok limit=${rl.limit ?? '-'} used=${rl.used ?? '-'} remaining=${rl.remaining ?? '-'}`);
+    } else { log.info(`Admin bypass auth`); }
 
     const client = new ImapFlow({
       host: 'imap.gmail.com',
@@ -322,13 +328,17 @@ export default async function handler(req, res) {
       ...IMAP_TIMEOUTS,
     });
 
+    log.info(`IMAP connect start host=imap.gmail.com user=${maskEmail(gmailUser)} mode=${uid ? 'uid:'+uid : from||search ? 'search' : 'list'} limit=${limit}`);
     const work = accessInbox(client, { uid, limit, from, search });
     work.catch(() => {}); // swallow late failures once the deadline has already fired
     const outcome = await withDeadline(work, DEADLINE_MS);
+    if (outcome.status === 200) log.info(`IMAP success status=${outcome.status} ${uid ? 'email uid='+uid : 'count='+(outcome.json.count ?? '-')} total_inbox=${outcome.json.total_inbox ?? '-'} dur=${Date.now()-t0}ms`);
+    else log.warn(`IMAP non-200 status=${outcome.status} detail=${outcome.json?.error || '-'}`);
     return res.status(outcome.status).json(outcome.json);
   } catch (error) {
-    console.error('IMAP Error:', error);
+    log.error(`IMAP Error: ${error.message} code=${error.code || '-'}`, { stack: error.stack?.slice(0,1200) });
     const mapped = mapError(error);
+    log.warn(`Mapped error ${mapped.statusCode} -> ${mapped.errorMessage} hint=${mapped.hint.slice(0,120)}`);
     res.status(mapped.statusCode).json({
       status: 'error',
       error: mapped.errorMessage,

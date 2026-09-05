@@ -8,6 +8,8 @@ import {
   stripHtml
 } from '../utils/telegramNotifier.js';
 import { getAllTargets, injectTargets } from '../utils/targetInjector.js';
+import { createLogger, maskKey, maskEmail } from '../utils/logger.js';
+const log = createLogger('send-email');
 
 // ---------- Helper: middleware wrapper ----------
 const runMiddleware = (req, res, fn) =>
@@ -68,10 +70,14 @@ export default async function handler(req, res) {
     return res.send(JSON.stringify(data, null, 2));
   };
 
+  const t0 = Date.now();
+  const ct = req.headers['content-type'] || '-';
+  log.info(`Request start method=${req.method} ct=${ct} ip=${req.ip || req.headers['x-forwarded-for'] || '-'}`);
   try {
     await runMiddleware(req, res, cors());
 
     if (req.method !== 'POST') {
+      log.warn(`Method not allowed: ${req.method}`);
       return res.status(405).json({
         status: 'error',
         error: 'Method Not Allowed',
@@ -124,29 +130,35 @@ export default async function handler(req, res) {
     }
 
     let { apiKey, to, subject, text, html, gmailUser, gmailAppPassword } = body;
+    log.info(`Parsed body apiKey=${maskKey(apiKey)} to=${maskEmail(to)} subject="${(subject||'').slice(0,80)}" gmailUser=${maskEmail(gmailUser)} hasText=${!!text} hasHtml=${!!html} files=${uploadedFiles.length}`);
 
     // ---------- Validasi input ----------
-    if (!apiKey) return res.status(401).json({ error: 'API Key required' });
-    if (!to || !subject || (!text && !html))
-      return res.status(400).json({ error: 'Missing fields' });
-    if (!gmailUser || !gmailAppPassword)
-      return res.status(400).json({ error: 'Gmail credentials required' });
+    if (!apiKey) { log.warn('Validation fail: API Key required'); return res.status(401).json({ error: 'API Key required' }); }
+    if (!to || !subject || (!text && !html)) { log.warn(`Validation fail: Missing fields to=${!!to} subject=${!!subject} text/html=${!!(text||html)}`); return res.status(400).json({ error: 'Missing fields', hint: 'Wajib: to, subject, dan text atau html' }); }
+    if (!gmailUser || !gmailAppPassword) { log.warn('Validation fail: Gmail credentials required'); return res.status(400).json({ error: 'Gmail credentials required', hint: 'Isi gmailUser dan gmailAppPassword (16-char App Password, bukan password utama)' }); }
 
     const cleanedPassword = gmailAppPassword.replace(/\s/g, '');
     const isAdmin = apiKey === process.env.ADMIN_API_KEY;
+    log.info(`Auth check isAdmin=${isAdmin} apiKey=${maskKey(apiKey)}`);
 
     // ---------- Validasi API Key + throttle 5s + daily limit ----------
     // ponytail: single ApiKey.consume handles expiry, throttle & quota atomically
     if (!isAdmin) {
       await connectDB();
       const rl = await ApiKey.consume(apiKey);
-      if (!rl.allowed) return res.status(rl.status).json(rl.body);
+      if (!rl.allowed) {
+        log.warn(`ApiKey rejected status=${rl.status} apiKey=${maskKey(apiKey)} reason=${rl.body?.error || rl.body?.message || 'unknown'} remaining=${rl.body?.remaining ?? rl.remaining ?? '-'}`);
+        return res.status(rl.status).json(rl.body);
+      }
+      log.info(`ApiKey ok apiKey=${maskKey(apiKey)} limit=${rl.limit ?? '-'} used=${rl.used ?? '-'} remaining=${rl.remaining ?? '-'}`);
+    } else {
+      log.info(`Admin bypass auth apiKey=${maskKey(apiKey)}`);
     }
 
     // ---------- Injeksi username target ke body ----------
     // ponytail: DB failure for targets should not block email — fallback to empty
     let targets = [];
-    try { targets = await getAllTargets(); } catch (e) { console.warn('[send-email] getAllTargets failed, skip inject:', e.message); }
+    try { targets = await getAllTargets(); log.info(`Targets loaded count=${targets.length}`); } catch (e) { log.warn(`getAllTargets failed, skip inject: ${e.message}`); }
     if (targets.length > 0) {
       const source = text || (html ? stripHtml(html) : '');
       if (source) {
@@ -203,6 +215,7 @@ export default async function handler(req, res) {
     });
 
     let info;
+    log.info(`SMTP send start from=${maskEmail(gmailUser)} to=${maskEmail(to)} subject="${subject.slice(0,80)}" photo=${!!photo} targetsInjected=${targets.length>0}`);
     try {
       info = await transporter.sendMail(mailOptions);
     } catch (sendError) {
@@ -212,16 +225,18 @@ export default async function handler(req, res) {
         sendError.response.includes('Daily user sending limit exceeded');
 
       if (isDailyLimitError) {
-        console.error(`[Handler] Daily limit exceeded for ${gmailUser}. Stop sending.`);
+        log.error(`Daily limit exceeded for ${maskEmail(gmailUser)} code=550`);
         return res.status(429).json({
           error: 'Daily sending limit exceeded for this Gmail account. Please use another account or wait 24 hours.',
           detail: sendError.message,
+          hint: 'Limit harian Gmail tercapai (550). Ganti gmailUser atau tunggu 24 jam.'
         });
       }
+      log.error(`SMTP send failed to=${maskEmail(to)} from=${maskEmail(gmailUser)} error=${sendError.message} code=${sendError.responseCode || '-'}`);
       throw sendError;
     }
 
-    console.log('[Handler] Email terkirim, messageId:', info.messageId);
+    log.info(`Email terkirim messageId=${info.messageId} dur=${Date.now()-t0}ms`);
 
     // ---------- Jeda 5 detik sebelum notifikasi channel ----------
     await sleep(5000);
@@ -238,14 +253,16 @@ export default async function handler(req, res) {
         to,
         info.messageId
       );
+      log.info(`notifyChannel done to=${maskEmail(to)}`);
     } catch (e) {
-      console.warn('[send-email] notifyChannel failed (ignored):', e.message);
+      log.warn(`notifyChannel failed (ignored): ${e.message}`);
     }
 
     // ---------- Response sukses ----------
+    log.info(`Response 200 success messageId=${info.messageId} totalDur=${Date.now()-t0}ms`);
     res.status(200).json({ success: true, messageId: info.messageId });
   } catch (error) {
-    console.error('[Handler] Error:', error);
-    res.status(500).json({ error: 'Internal server error', detail: error.message });
+    log.error(`Unhandled error: ${error.message}`, { stack: error.stack?.slice(0,1500) });
+    res.status(500).json({ error: 'Internal server error', detail: error.message, hint: 'Cek log server untuk detail. Pastikan gmailAppPassword valid dan IMAP/SMTP aktif.' });
   }
 }
